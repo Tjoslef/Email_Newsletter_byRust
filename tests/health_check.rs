@@ -2,7 +2,31 @@ use uuid::Uuid;
 use zero2prod::configuration::{self,get_configuration,DatabaseSettings};
 use zero2prod::startup::run;
 use sqlx::{Connection, PgConnection, PgPool,Executor};
+use zero2prod::telemetry::{get_subcriber,int_subscriber};
 use std::net::TcpListener;
+use std::sync::LazyLock;
+    static TRACING:LazyLock<()> = LazyLock::new(||{
+    let default_filter_level = "info".to_string();
+    let subscriber_name = "test".to_string();
+    if std::env::var("TEST_LOG").is_ok(){
+        let subscriber = get_subcriber(
+            subscriber_name,
+            default_filter_level,
+            std::io::stdout
+        );
+
+
+
+    int_subscriber(subscriber);
+}
+else {
+    let subscriber = get_subcriber(
+        subscriber_name,
+        default_filter_level,
+        std::io::stdout);
+    int_subscriber(subscriber);
+}
+});
 pub struct TestApp{
     pub address: String,
     pub db_pool: PgPool,
@@ -10,11 +34,13 @@ pub struct TestApp{
 }
 
 async fn spawn_app() -> TestApp {
+    LazyLock::force(&TRACING);
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind random port");
     let port = listener.local_addr().unwrap().port();
     let address = format!("http://127.0.0.1:{}", port);
     let mut configuration = get_configuration().expect("Failed to read configuration.");
     configuration.database.database_name = Uuid::new_v4().to_string();
+    let connection_pool = configure_database(&configuration.database).await;
     let connection_pool =PgPool::connect(
     &configuration.database.connection_string())
     .await
@@ -30,29 +56,32 @@ async fn spawn_app() -> TestApp {
 
     }
 }
-pub async fn configure_database(config: &DatabaseSettings) -> PgPool{
-let maintenance_setting = DatabaseSettings{
-database_name: "newsletter".to_string(),
-username: "postgres".to_string(),
-password: "password".to_string(),
+pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    println!("hello confi");
+    // Create database
+    let maintenance_settings = DatabaseSettings {
+        database_name: "postgres".to_string(),
+        username: "postgres".to_string(),
+        password: "password".to_string(),
         ..config.clone()
     };
-let mut connection =PgConnection::connect(
-    &maintenance_setting.connection_string()
-)
-.await
-.expect("Failed to connect to Postres2");
-connection.execute(format!(r#"CREATE DATABASE "{}";"#,config.database_name).as_str())
-    .await
-    .expect("Failed to create database");
-let connection_pool = PgPool::connect(&config.connection_string())
-    .await
-    .expect("Failed to connect to Postres.");
-sqlx::migrate!("./migrations")
-    .run(&connection_pool)
-    .await
-    .expect("Failed to migrate the database_name");
-connection_pool
+    let mut connection = PgConnection::connect(&maintenance_settings.connection_string())
+        .await
+        .expect("Failed to connect to Postgres");
+    connection
+        .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name.to_string()).as_str())
+        .await
+        .expect("Failed to create database.");
+
+    // Migrate database
+    let connection_pool = PgPool::connect(&config.connection_string())
+        .await
+        .expect("Failed to connect to Postgres.");
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate the database");
+    connection_pool
 }
 
 #[tokio::test]
